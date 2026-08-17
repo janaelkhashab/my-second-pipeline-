@@ -13,3 +13,8 @@ COPY test_calculator.py .
 
 # Command to run when container starts
 CMD ["python", "-c", "print('Calculator app is ready!')"]
+FROM python:3.10-slim
+WORKDIR /app
+COPY . .
+RUN pip install -r requirements.txt
+CMD ["python", "app.py"]
