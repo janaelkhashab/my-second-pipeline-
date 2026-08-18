@@ -8,7 +8,9 @@ on:
 
 jobs:
 
-  # JOB 1: Test your code on multiple Python versions
+  # ==========================================
+  # JOB 1: TEST
+  # ==========================================
   test:
     runs-on: ubuntu-latest
 
@@ -17,20 +19,24 @@ jobs:
         python-version: ['3.9', '3.10', '3.11']
 
     steps:
+
       - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-          cache: 'pip'
+          cache: pip
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install flake8 pytest
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          fi
 
       - name: Lint with flake8
         run: |
@@ -38,72 +44,52 @@ jobs:
           flake8 . --count --exit-zero --max-complexity=10 --statistics
 
       - name: Run tests
-        run: pytest test_calculator.py -v
+        run: |
+          pytest test_calculator.py -v
 
 
-  # JOB 2: Build Docker image and deploy to OpenShift
+  # ==========================================
+  # JOB 2: BUILD + PUSH + DEPLOY
+  # ==========================================
   deploy:
     runs-on: ubuntu-latest
-    needs: test
-    if: github.ref == 'refs/heads/main'
 
-    permissions:
-      contents: read
-      packages: write
+    # Deploy only after ALL test matrix jobs pass
+    needs: test
+
+    # Deploy only when code is pushed to main
+    if: github.ref == 'refs/heads/main'
 
     steps:
 
-      # Checkout your code
+      # ------------------------------------------
+      # 1. Checkout repository
+      # ------------------------------------------
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # Login to GitHub Container Registry
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Build Docker image from your Dockerfile
-      # and push it to GitHub Container Registry
-
-      # Build Docker image
-      # -------------------------
-      - name: Build Docker image
-        env:
-          REGISTRY: ${{ secrets.OPENSHIFT_REGISTRY }}
-          NAMESPACE: ${{ secrets.OPENSHIFT_NAMESPACE }}
-        run: |
-          docker build \
-            -t "$REGISTRY/$NAMESPACE/calculator-app:latest" .
-
-
-      # -------------------------
-      # Push image to OpenShift
-      # -------------------------
-      - name: Push Docker image
-        env:
-          REGISTRY: ${{ secrets.OPENSHIFT_REGISTRY }}
-          NAMESPACE: ${{ secrets.OPENSHIFT_NAMESPACE }}
-        run: |
-          docker push "$REGISTRY/$NAMESPACE/calculator-app:latest"
-
-
-      # Install OpenShift CLI
+      # ------------------------------------------
+      # 2. Install OpenShift CLI
+      # ------------------------------------------
       - name: Install OpenShift CLI
         run: |
           curl -LO https://mirror.openshift.com/pub/openshift-v4/clients/ocp/stable/openshift-client-linux.tar.gz
           tar -xzf openshift-client-linux.tar.gz
           sudo mv oc /usr/local/bin/
+
           oc version
 
-      # Login to OpenShift
+
+      # ------------------------------------------
+      # 3. Login to OpenShift
+      # ------------------------------------------
       - name: Login to OpenShift
         env:
           OPENSHIFT_SERVER: ${{ secrets.OPENSHIFT_SERVER }}
           OPENSHIFT_TOKEN: ${{ secrets.OPENSHIFT_TOKEN }}
           OPENSHIFT_NAMESPACE: ${{ secrets.OPENSHIFT_NAMESPACE }}
+
         run: |
           oc login "$OPENSHIFT_SERVER" \
             --token="$OPENSHIFT_TOKEN" \
@@ -111,30 +97,158 @@ jobs:
 
           oc project "$OPENSHIFT_NAMESPACE"
 
-      # Deploy your Docker image to OpenShift
-      - name: Deploy application
+          echo "Logged into OpenShift"
+          echo "Project: $OPENSHIFT_NAMESPACE"
+
+
+      # ------------------------------------------
+      # 4. Get OpenShift Registry
+      # ------------------------------------------
+      - name: Get OpenShift Registry
         run: |
-          IMAGE="ghcr.io/${{ github.repository_owner }}/calculator-app:latest"
+          REGISTRY=$(oc registry info --public)
 
-          oc delete deployment calculator-app --ignore-not-found=true
-          oc delete service calculator-app --ignore-not-found=true
-          oc delete route calculator-app --ignore-not-found=true
+          echo "REGISTRY=$REGISTRY" >> "$GITHUB_ENV"
 
-          oc create deployment calculator-app --image="$IMAGE"
+          echo "OpenShift Registry:"
+          echo "$REGISTRY"
 
-          oc expose deployment calculator-app --port=8080
+
+      # ------------------------------------------
+      # 5. Login to OpenShift Image Registry
+      # ------------------------------------------
+      - name: Login to OpenShift Image Registry
+        env:
+          OPENSHIFT_TOKEN: ${{ secrets.OPENSHIFT_TOKEN }}
+
+        run: |
+          echo "$OPENSHIFT_TOKEN" | docker login "$REGISTRY" \
+            --username=unused \
+            --password-stdin
+
+
+      # ------------------------------------------
+      # 6. Build Docker Image
+      # ------------------------------------------
+      - name: Build Docker Image
+        env:
+          OPENSHIFT_NAMESPACE: ${{ secrets.OPENSHIFT_NAMESPACE }}
+
+        run: |
+
+          IMAGE="$REGISTRY/$OPENSHIFT_NAMESPACE/calculator-app:latest"
+
+          echo "Building image:"
+          echo "$IMAGE"
+
+          docker build \
+            -t "$IMAGE" \
+            .
+
+
+      # ------------------------------------------
+      # 7. Push Image to OpenShift Registry
+      # ------------------------------------------
+      - name: Push Docker Image
+        env:
+          OPENSHIFT_NAMESPACE: ${{ secrets.OPENSHIFT_NAMESPACE }}
+
+        run: |
+
+          IMAGE="$REGISTRY/$OPENSHIFT_NAMESPACE/calculator-app:latest"
+
+          echo "Pushing image:"
+          echo "$IMAGE"
+
+          docker push "$IMAGE"
+
+
+      # ------------------------------------------
+      # 8. Deploy Application to OpenShift
+      # ------------------------------------------
+      - name: Deploy Application
+        env:
+          OPENSHIFT_NAMESPACE: ${{ secrets.OPENSHIFT_NAMESPACE }}
+
+        run: |
+
+          IMAGE="$REGISTRY/$OPENSHIFT_NAMESPACE/calculator-app:latest"
+
+          echo "Deploying:"
+          echo "$IMAGE"
+
+
+          # Remove old deployment
+          oc delete deployment calculator-app \
+            --ignore-not-found=true
+
+
+          # Remove old service
+          oc delete service calculator-app \
+            --ignore-not-found=true
+
+
+          # Remove old route
+          oc delete route calculator-app \
+            --ignore-not-found=true
+
+
+          # Create deployment using OUR Docker image
+          oc create deployment calculator-app \
+            --image="$IMAGE"
+
+
+          # Expose application on port 8080
+          oc expose deployment calculator-app \
+            --port=8080
+
+
+          # Create OpenShift route
           oc expose service calculator-app
 
-          oc rollout status deployment/calculator-app --timeout=180s
 
-          echo "Pods:"
+      # ------------------------------------------
+      # 9. Wait for Deployment
+      # ------------------------------------------
+      - name: Wait for Deployment
+        run: |
+
+          oc rollout status deployment/calculator-app \
+            --timeout=180s
+
+
+      # ------------------------------------------
+      # 10. Show Deployment Information
+      # ------------------------------------------
+      - name: Show Deployment Status
+        run: |
+
+          echo "================================"
+          echo "PODS"
+          echo "================================"
+
           oc get pods
 
-          echo "Service:"
+
+          echo "================================"
+          echo "SERVICE"
+          echo "================================"
+
           oc get service calculator-app
 
-          echo "Route:"
+
+          echo "================================"
+          echo "ROUTE"
+          echo "================================"
+
           oc get route calculator-app
 
-          echo "Application URL:"
-          echo "https://$(oc get route calculator-app -o jsonpath='{.spec.host}')"
+
+          echo "================================"
+          echo "APPLICATION URL"
+          echo "================================"
+
+          HOST=$(oc get route calculator-app \
+            -o jsonpath='{.spec.host}')
+
+          echo "https://$HOST"
