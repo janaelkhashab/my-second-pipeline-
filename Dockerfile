@@ -1,20 +1,13 @@
-# Use Python 3.10 as the base image
 FROM python:3.10-slim
 
-# Set working directory inside the container
 WORKDIR /app
 
-# Copy your code into the container
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
 COPY calculator.py .
-COPY test_calculator.py .
+COPY app.py .
 
-# Install dependencies (if you have any)
-# RUN pip install flask pytest
+EXPOSE 8080
 
-# Command to run when container starts
-CMD ["python", "-c", "print('Calculator app is ready!')"]
-FROM python:3.10-slim
-WORKDIR /app
-COPY . .
-RUN pip install -r requirements.txt
 CMD ["python", "app.py"]
